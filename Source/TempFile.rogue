@@ -1,0 +1,9 @@
+class TempFile( base_name:String )
+  METHODS
+    method on_use->File
+      return File( "/tmp/$-$" (base_name,Random.int32->String(&hex)) )
+
+    method on_end_use( file:File )
+      if (file.exists) file.delete
+endClass
+

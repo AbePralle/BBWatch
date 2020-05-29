@@ -1,0 +1,86 @@
+class Dependencies
+  GLOBAL METHODS
+    method configure
+      install_exe
+      require_program( "entr" )
+
+    method require_command_line
+      noAction
+
+    method require_program( name:String )
+      if (System.find_program(name)) return
+      if (not System.find_program("brew"))
+        println( ("The command line tool '$' must be installed. First Homebrew " ...
+                  "will be installed and then it will be used to install '$'."(name,name)).word_wrapped(80) )
+        install_brew
+      endIf
+      install_tool( name )
+
+    method execute( commands:String, &suppress_error )->Logical
+      forEach (cmd in LineReader(commands))
+        print( "> " ).println( cmd )
+        if (System.run(cmd) != 0)
+          if (suppress_error) return false
+          else                throw Error( "Command failed." )
+        endIf
+      endForEach
+      return true
+
+    method exists( exe_name:String )->Logical
+      return (0 == System.run("which $ >& /dev/null"(exe_name)))
+
+    method install_exe
+      local exe_filepath = System.executable_filepath
+      contingent
+        local existing = System.find_program( "bbwatch" )
+        necessary existing
+        #necessary (not File.is_different_than(existing,exe_filepath))
+      unsatisfied
+        println "This program will copy itself to /usr/local/bin/bbwatch"
+        println "Press ENTER to continue or enter 'n' to cancel."
+        local input = Console.input( "> " )
+        if (input != "" and input != "y") throw Error( "Installation of BBWatch cancelled." )
+
+        local sudo = ""
+        loop
+          try
+            if (not File.exists("/usr/local/bin")) execute( "$mkdir /usr/local/bin"(sudo) )
+            File.copy( exe_filepath, "/usr/local/bin/bbwatch" )
+            execute( "$chmod a+x /usr/local/bin/bbwatch"(sudo) )
+            println "You can now type 'bbwatch' from anywhere to run BBWatch."
+            escapeLoop
+          catch (err:Error)
+            if (sudo != "") throw err
+            sudo = "sudo "
+          endTry
+        endLoop
+      endContingent
+
+    method install_brew
+      if (exists("brew")) return
+
+      require_command_line
+      println "\nHomebrew must be installed."
+      println "Press ENTER to install or enter 'n' to cancel."
+      local input = Console.input( "> " )
+      if (input != "" and input != "y") throw Error( "Missing required dependency 'brew' (Homebrew)." )
+
+      local cmd = @|/usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+      println cmd
+      if (0 == System.run(cmd)) return
+      throw Error( "Failed to install Homebrew." )
+
+    method install_tool( tool_name:String, exe_name=null:String )
+      exe_name = ?:{ exe_name || tool_name }
+      if (exists(exe_name)) return
+
+      require_command_line
+      println "\nThe command line tool '$' must be installed." (tool_name)
+      println "Press ENTER to install or enter 'n' to cancel."
+      local input = Console.input( "> " )
+      if (input != "" and input != "y") throw Error( "Missing required library '$'." (tool_name) )
+
+      local cmd = "brew install $" (tool_name)
+      println cmd
+      if (0 != System.run(cmd)) throw Error( "Failed to install library '$'." (tool_name) )
+endClass

@@ -57,56 +57,55 @@ class TempFile( base_name:String )
 endClass
 
 class BBWatch
-  PROPERTIES
-    interval           = 1.0
-    last_updated_times = Real64[]
-
   METHODS
     method init( args:String[] )
+      local files = String[]
+      local update_mode = false
       forEach (arg in rewriter=args.rewriter)
-        if (arg.begins_with("--interval="))
-          interval = arg.after_first('=')->Real64
+        if (arg == "--update")
+          update_mode = true
+        elseIf (update_mode)
+          update( arg )
+        elseIf (File.exists(arg) and not File.is_folder(arg))
+          files.add( File.absolute_filepath(arg) )
         else
-          rewriter.write( arg )
+          local listing = File.listing( arg, &ignore_hidden )
+          if (listing.count)
+            files.add( File.absolute_filepath(forEach in listing) )
+          else
+            files.add( File.absolute_filepath(arg) )
+          endIf
         endIf
       endForEach
 
-      if (args.is_empty)
-        print_usage
+      if (files.is_empty)
+        if (not update_mode) print_usage
         return
       endIf
 
-      local files = args.cloned
-      println "Interval " + interval.format(".2")
       println "Press CTRL+C to cancel BBWatch"
-      last_updated_times.expand_to_count( args.count )
+      println
 
-      loop
-        forEach (filepath at index in files)
-          local cur_time = File.timestamp( filepath )
-          if (cur_time > last_updated_times[index] or not cur_time)
-            update( filepath )
-            last_updated_times[ index ] = cur_time
-          endIf
-        endForEach
-        System.sleep( interval )
-      endLoop
+      forEach (filepath in files)
+        update( filepath )
+      endForEach
+
+      local escaped_files = files.map<<String>>( (filepath) => File.shell_escaped(filepath) )
+      local cmd = ''printf "$\\n" | entr -p bbwatch --update /_'' (escaped_files.join("\\n"))
+      Process( cmd, &env )
 
     method print_usage
       println @|USAGE
-               |  bbwatch [--interval=1.0] <filepaths>
-               |
-               |OPTIONS
-               |  --interval=<seconds>
-               |    Specify the sleep interval between checking for updated files, in seconds.
-               |    This can be a decimal such as 0.5. The default is 1.0.
+               |  bbwatch <wildcard-filepaths>
                |
                |DESCRIPTION
-               |  Checks once a second to see if the given files have changed. If they have,
-               |  BBWatch uses AppleScript to copy and paste the content of the file into the
-               |  active Buildbox JavaScript editor IF the Buildbox editor contains the same
-               |  first line as a given file. Use a unique header comment to ensure that the
-               |  correct JavaScript is updated.
+               |  Whenever any listed filepaths have changed, BBWatch uses AppleScript to copy
+               |  and paste the content of the file into the active Buildbox JavaScript editor
+               |  IF the Buildbox editor contains the same first line as a given file. Use a
+               |  unique header comment to ensure that the correct JavaScript is updated.
+               |
+               |  If a given filename does not exist, BBWatch will copy the current Buildbox
+               |  JavaScript content to the file before starting to watch the file.
                |
                |  Press CTRL+C to cancel BBWatch.
                |
@@ -118,15 +117,16 @@ class BBWatch
       println text.word_wrapped( 80 )
 
     method update( filepath:String )
-      println "$  Synching $ -> Buildbox" (Timestamp(System.time),filepath)
       local old_content = get_bb_js_content
       if (not old_content)
+        println "$  Synching $ <> Buildbox" (Timestamp(System.time),filepath)
         println "=" * 80
         println "ERROR: cannot find any currently-displayed JavaScript content in Buildbox."
         println "=" * 80
         return
       endIf
       if (old_content.begins_with("function init"))
+        println "$  Synching $ <> Buildbox" (Timestamp(System.time),filepath)
         local message = "ERROR: existing Buildbox JavaScript has no uniquely identifying first line. " ...
                         "Please add the same unique comment to the the first line of the Buildbox JavaScript " ...
                         "as well as the first line of $." (bolded(filepath))
@@ -137,7 +137,8 @@ class BBWatch
       endIf
 
       if (not File.exists(filepath))
-        print_word_wrapped( "$ does not yet exist. Copying JavaScript to $." (bolded(filepath),bolded(filepath)) )
+        print_word_wrapped( "$ does not yet exist." (bolded(filepath)) )
+        println "$  Synching Buildbox -> $" (Timestamp(System.time),filepath)
         File.save( filepath, old_content )
         return
       endIf
@@ -145,6 +146,7 @@ class BBWatch
       local new_content = File.load_as_string( filepath )
 
       if (old_content.before_first('\n').trimmed != new_content.before_first('\n').trimmed)
+        println "$  Synching $ -> Buildbox" (Timestamp(System.time),filepath)
         local message = "ERROR: the first line of the Buildbox JavaScript content does not match the first line " ...
                         "of $. BBWatch will only synch content to Buildbox if the first lines match." ...
                         (bolded(filepath))
@@ -154,6 +156,7 @@ class BBWatch
         return
       endIf
 
+      println "$  Synching $ -> Buildbox" (Timestamp(System.time),filepath)
       set_bb_js_content( new_content )
 
     method get_bb_js_content->String

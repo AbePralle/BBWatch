@@ -1,0 +1,208 @@
+#===============================================================================
+# BBWatch.rogue
+# May 28, 2020
+#===============================================================================
+$requireRogue "1.7.3"
+
+if (System.is_macos)
+  install_launcher
+  BBWatch( System.command_line_arguments.cloned )
+else
+  Console.error.println "BBWatch only supports macOS"
+endIf
+
+routine install_launcher
+  local bbwatch_filepath = File.absolute_filepath( System.executable_filepath )
+  contingent
+    local launcher_filepath = System.find_program( "bbwatch" )
+    necessary launcher_filepath
+    necessary File.load_as_string( launcher_filepath ).contains( System.executable_filepath )
+
+  unsatisfied
+    println "Creating bbwatch launcher in /usr/local/bin"
+    local sudo = ""
+    loop
+      try
+        if (not File.exists("/usr/local/bin")) execute( "$mkdir /usr/local/bin"(sudo) )
+        File.save( "bbwatch.launcher", ''#!/bin/sh\nexec "$" "$@"\n''(bbwatch_filepath,'$') )
+        execute( "$mv bbwatch.launcher /usr/local/bin/bbwatch"(sudo) )
+        execute( "$chmod a+x /usr/local/bin/bbwatch"(sudo) )
+        escapeLoop
+      catch (err:Error)
+        if (sudo != "") throw err
+        sudo = "sudo "
+      endTry
+    endLoop
+  endContingent
+endRoutine
+
+routine execute( commands:String, &suppress_error )->Logical
+  forEach (cmd in LineReader(commands))
+    print( "> " ).println( cmd )
+    if (System.run(cmd) != 0)
+      if (suppress_error) return false
+      else                throw Error( "Build failed." )
+    endIf
+  endForEach
+  return true
+endRoutine
+
+class TempFile( base_name:String )
+  METHODS
+    method on_use->File
+      return File( "/tmp/$-$" (base_name,Random.int32->String(&hex)) )
+
+    method on_end_use( file:File )
+      if (file.exists) file.delete
+endClass
+
+class BBWatch
+  PROPERTIES
+    interval           = 1.0
+    last_updated_times = Real64[]
+
+  METHODS
+    method init( args:String[] )
+      forEach (arg in rewriter=args.rewriter)
+        if (arg.begins_with("--interval="))
+          interval = arg.after_first('=')->Real64
+        else
+          rewriter.write( arg )
+        endIf
+      endForEach
+
+      if (args.is_empty)
+        print_usage
+        return
+      endIf
+
+      local files = args.cloned
+      println "Interval " + interval.format(".2")
+      println "Press CTRL+C to cancel BBWatch"
+      last_updated_times.expand_to_count( args.count )
+
+      loop
+        forEach (filepath at index in files)
+          local cur_time = File.timestamp( filepath )
+          if (cur_time > last_updated_times[index] or not cur_time)
+            update( filepath )
+            last_updated_times[ index ] = cur_time
+          endIf
+        endForEach
+        System.sleep( interval )
+      endLoop
+
+    method print_usage
+      println @|USAGE
+               |  bbwatch [--interval=1.0] <filepaths>
+               |
+               |OPTIONS
+               |  --interval=<seconds>
+               |    Specify the sleep interval between checking for updated files, in seconds.
+               |    This can be a decimal such as 0.5. The default is 1.0.
+               |
+               |DESCRIPTION
+               |  Checks once a second to see if the given files have changed. If they have,
+               |  BBWatch uses AppleScript to copy and paste the content of the file into the
+               |  active Buildbox JavaScript editor IF the Buildbox editor contains the same
+               |  first line as a given file. Use a unique header comment to ensure that the
+               |  correct JavaScript is updated.
+               |
+               |  Press CTRL+C to cancel BBWatch.
+               |
+
+    method bolded( text:String )->String
+      return "$$$" (ConsoleStyle().bold,text,ConsoleStyle().bold_off)
+
+    method print_word_wrapped( text:String )
+      println text.word_wrapped( 80 )
+
+    method update( filepath:String )
+      println "$  Synching $ -> Buildbox" (Timestamp(System.time),filepath)
+      local old_content = get_bb_js_content
+      if (not old_content)
+        println "=" * 80
+        println "ERROR: cannot find any currently-displayed JavaScript content in Buildbox."
+        println "=" * 80
+        return
+      endIf
+      if (old_content.begins_with("function init"))
+        local message = "ERROR: existing Buildbox JavaScript has no uniquely identifying first line. " ...
+                        "Please add the same unique comment to the the first line of the Buildbox JavaScript " ...
+                        "as well as the first line of $." (bolded(filepath))
+        println "=" * 80
+        print_word_wrapped( message )
+        println "=" * 80
+        return
+      endIf
+
+      if (not File.exists(filepath))
+        print_word_wrapped( "$ does not yet exist. Copying JavaScript to $." (bolded(filepath),bolded(filepath)) )
+        File.save( filepath, old_content )
+        return
+      endIf
+
+      local new_content = File.load_as_string( filepath )
+
+      if (old_content.before_first('\n').trimmed != new_content.before_first('\n').trimmed)
+        local message = "ERROR: the first line of the Buildbox JavaScript content does not match the first line " ...
+                        "of $. BBWatch will only synch content to Buildbox if the first lines match." ...
+                        (bolded(filepath))
+        println "=" * 80
+        print_word_wrapped( message )
+        println "=" * 80
+        return
+      endIf
+
+      set_bb_js_content( new_content )
+
+    method get_bb_js_content->String
+      # No luck trying to read AppleScript results from a Process, so move data through temporary files.
+      use temp_file = TempFile( "bbwatch" )
+
+        local process = Process( "osascript", &writable )
+
+        local script = @|tell application "System Events"
+                        |  set js_area to first text area of splitter group 2 of group 2 of window "Default" of application process "Buildbox"
+                        |  set js_content to value of js_area as text
+                        |  set outfile to open for access POSIX file "$TMPFILE" with write permission
+                        |  write js_content to outfile as «class utf8»
+                        |  close access outfile
+                        |end tell
+
+        script = script.replacing( "$TMPFILE", temp_file.filepath )
+        local writer = PrintWriter( process.input_writer )
+        writer.println script
+        process.finish
+        local result = ProcessResult( process.exit_code, process.output_bytes, process.error_bytes )
+        if (not result.success) return null
+        return temp_file.load_as_string
+      endUse
+
+    method set_bb_js_content( new_content:String )
+      use temp_file = TempFile( "bbwatch" )
+        temp_file.save( new_content )
+
+        local process = Process( "osascript", &writable )
+
+        local script = @|tell application "System Events"
+                        |  set infile to ("$TMPFILE")
+                        |  open for access POSIX file infile
+                        |  set file_content to (read (infile as «class utf8»))
+                        |  set js_area to first text area of splitter group 2 of group 2 of window "Default" of application process "Buildbox"
+                        |  set value of js_area to file_content
+                        |end tell
+
+        script = script.replacing( "$TMPFILE", temp_file.filepath )
+        local writer = PrintWriter( process.input_writer )
+        writer.println script
+        process.finish
+
+        local result = ProcessResult( process.exit_code, process.output_bytes, process.error_bytes )
+        if (not result.success)
+          println "ERROR synching content."
+        endIf
+      endUse
+
+endClass
+
